@@ -117,11 +117,9 @@ void vec_to_grid(VECTOR *pos)
 }
 
 // return center of the grid
-VECTOR *map_get_center_pos()
+void map_get_center_pos(VECTOR *out)
 {
-    VECTOR pos;
-    vec_set(&pos, vector(-((GRID_MAX_X / 2) * ROOM_SIZE), -((GRID_MAX_Y / 2) * ROOM_SIZE), 0));
-    return &pos;
+    vec_set(out, vector(-((GRID_MAX_X / 2) * ROOM_SIZE), -((GRID_MAX_Y / 2) * ROOM_SIZE), 0));
 }
 
 // reset given tile
@@ -307,7 +305,7 @@ TILE *map_get_starting_room()
 {
     // find the starting room (at the center of the grid)
     VECTOR pos;
-    vec_set(&pos, map_get_center_pos());
+    map_get_center_pos(&pos);
 
     // find tile position from the world3d position
     int i = 0, j = 0;
@@ -1050,7 +1048,7 @@ void map_generate()
     level_load("");
     wait(1);
     VECTOR pos;
-    vec_set(&pos, map_get_center_pos());
+    map_get_center_pos(&pos);
     vec_set(&camera->x, vector(pos.x, pos.y, 1000));
     vec_set(&camera->pan, vector(0, -90, 0));
 
@@ -1390,7 +1388,7 @@ void main()
     map_generate();
 
     VECTOR pos;
-    vec_set(&pos, map_get_center_pos());
+    map_get_center_pos(&pos);
     vec_set(&camera->x, vector(pos.x, pos.y, 1000));
     vec_set(&camera->pan, vector(0, -90, 0));
 
