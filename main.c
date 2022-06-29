@@ -1,1373 +1,1051 @@
-
-// tutorial/idea from https://www.boristhebrave.com/2020/09/12/dungeon-generation-in-binding-of-isaac/
-// also some details are taken from 'Binding of Isaac: Explained!' videos from https://youtube.com/playlist?list=PLm_aCwRGMyAdCkytm9sp2-X7jfEU9ccXm
-
 #include <acknex.h>
 #include <default.c>
-#include <windows.h>
-#include <strio.c>
-
-#include "console.h"
 
 #define PRAGMA_POINTER
 
-#include "list.h"
+#include "vector2d.c"
+#include "dynamic_array.h"
 
-// max grid size
-#define GRID_MAX_X 32
-#define GRID_MAX_Y 32
-#define ROOM_SIZE 32
+#define MIN(x, y) ifelse(x <= y, x, y)
+#define MAX(x, y) ifelse(x >= y, x, y)
+#define RANDOM_CHANCE(c) integer(random(c)) == 0
+#define RANDOM_RANGE(min, max) (min + integer(random(max - min)))
 
-// different room types
+#define MAP_WIDTH 15
+#define MAP_HEIGHT 15
+#define MAP_CELL_SIZE 32
+
 #define ROOM_NONE 0
 #define ROOM_NORMAL 1
 #define ROOM_START 2
 #define ROOM_BOSS 3
-#define ROOM_SHOP 4
-#define ROOM_ITEM 5
+#define ROOM_SPECIAL 4
+#define ROOM_LOCKED 5
 #define ROOM_SECRET 6
 #define ROOM_SUPER_SECRET 7
 
-STRING *room_only_up_mdl = "room_only_up.mdl";
-STRING *room_only_right_mdl = "room_only_right.mdl";
-STRING *room_only_bottom_mdl = "room_only_bottom.mdl";
-STRING *room_only_left_mdl = "room_only_left.mdl";
+#define DEBUG_FONT_SCALE 0.5
 
-STRING *room_up_right_mdl = "room_up_right.mdl";
-STRING *room_right_bottom_mdl = "room_right_bottom.mdl";
-STRING *room_bottom_left_mdl = "room_bottom_left.mdl";
-STRING *room_left_up_mdl = "room_left_up.mdl";
+#define MAX_ROOM_SPRITES 16
+#define ROOM_TOP 0
+#define ROOM_RIGHT 1
+#define ROOM_BOTTOM 2
+#define ROOM_LEFT 3
+#define ROOM_TOP_N_RIGHT 4
+#define ROOM_RIGHT_N_BOTTOM 5
+#define ROOM_BOTTOM_N_LEFT 6
+#define ROOM_LEFT_N_TOP 7
+#define ROOM_LEFT_TOP_N_RIGHT 8
+#define ROOM_TOP_RIGHT_N_BOTTOM 9
+#define ROOM_RIGHT_BOTTOM_N_LEFT 10
+#define ROOM_BOTTOM_LEFT_N_TOP 11
+#define ROOM_TOP_N_BOTTOM 12
+#define ROOM_RIGHT_N_LEFT 13
+#define ROOM_ALL_SIDES 14
+#define ROOM_VOID 15
 
-STRING *room_up_bottom_mdl = "room_up_bottom.mdl";
-STRING *room_left_right_mdl = "room_left_right.mdl";
+#define CARDINAL_DIRECTIONS 4
+#define CARDINAL_TOP 0
+#define CARDINAL_RIGHT 1
+#define CARDINAL_BOTTOM 2
+#define CARDINAL_LEFT 3
 
-STRING *room_up_right_left_mdl = "room_up_right_left.mdl";
-STRING *room_up_right_bottom_mdl = "room_up_right_bottom.mdl";
-STRING *room_right_bottom_left_mdl = "room_right_bottom_left.mdl";
-STRING *room_bottom_left_up_mdl = "room_bottom_left_up.mdl";
+// up, right, bottom, left
+// up-right, right-bottom, bottom-left, left-up
+// left-up-right, up-right-bottom, right-bottom-left, bottom-left-up
+// up-bottom, left-right, all-sides, none
+BMAP *rooms_pcx = "rooms.pcx";
+BMAP *room[MAX_ROOM_SPRITES];
 
-STRING *room_all_mdl = "room_all.mdl";
-STRING *room_none_mdl = "room_none.mdl";
-
-typedef struct TILE
+typedef struct Tile
 {
-    VECTOR pos;
-
-    int id;
-    int pos_x;
-    int pos_y;
+    int region;
+    int x;
+    int y;
 
     int type;
-    int secret_chance;
 
     int doors;
-    int up;
+    int top;
     int right;
     int bottom;
     int left;
 
+    int secret_chance;
     int secret_doors;
-    int secret_up;
+    int secret_top;
     int secret_right;
     int secret_bottom;
     int secret_left;
-} TILE;
+} Tile;
 
-TILE map[GRID_MAX_X][GRID_MAX_Y];
-TILE *start_room_tile = NULL;        // starting room
-TILE *boss_room_tile = NULL;         // boss room (1 per level)
-TILE *shop_room_tile = NULL;         // shop room (1 per level)
-TILE *super_secret_room_tile = NULL; // super secret room (1 per level)
+int level_id = 2;
+int max_level_id = 5;
+int max_rooms = 0;
+int max_secrets = 0;
+int max_item_rooms = 0;
+int created_item_rooms = 0;
+int created_secret_rooms = 0;
+int boss_room_found = false;
+int shop_room_found = false;
+int super_secret_created = false;
 
-// Lists which we are using for each dungeon generation !
-List rooms_queue_list;     // queue of rooms for checking
-List end_rooms_list;       // list of end rooms
-List item_rooms_list;      // list of item rooms
-List secret_rooms_list;    // list of secret rooms
-List secret_position_list; // list of secret room potential positions
-List super_position_list;  // list of super secret room potential positions
+Array *rooms_queue_list;
+Array *end_rooms_list;
+Array *secret_positions_list;
+Array *secret_rooms_list;
+Array *super_positions_list;
 
-VECTOR start_room_pos; // position of the starting room
+Tile map[MAP_WIDTH][MAP_HEIGHT];
 
-int level_id = 1;      // currently running level's ID (min 1 and max 10)
-int max_rooms = 0;     // max amount of rooms to be created (changed in map_generate + increases with level_id)
-int created_rooms = 0; // amount of already created rooms
-int max_secrets = 0;   // max amount of secret rooms per level
+Vector2d cardinal_dir[CARDINAL_DIRECTIONS];
 
-// room function for visualisation
-void room_fnc()
+int is_in_map(int x, int y)
 {
-    set(my, PASSABLE | NOFILTER);
+    return x >= 0 && x < MAP_WIDTH && y >= 0 && y < MAP_HEIGHT;
 }
 
-// span given position to the grid
-void vec_to_grid(VECTOR *pos)
+void snap_to_grid(Vector2d *pos)
 {
     if (!pos)
-    {
-        diag("\nERROR in vec_to_grid! Given vector pointer doesn't exist!");
         return;
-    }
 
-    pos->x += (ROOM_SIZE / 2) * sign(pos->x);
-    pos->x = (integer(pos->x / ROOM_SIZE) * ROOM_SIZE);
-    pos->y += (ROOM_SIZE / 2) * sign(pos->y);
-    pos->y = (integer(pos->y / ROOM_SIZE) * ROOM_SIZE);
-    pos->z = 0;
+    pos->x += (MAP_CELL_SIZE / 2) * sign(pos->x);
+    pos->x = (integer(pos->x / MAP_CELL_SIZE) * MAP_CELL_SIZE);
+    pos->y += (MAP_CELL_SIZE / 2) * sign(pos->y);
+    pos->y = (integer(pos->y / MAP_CELL_SIZE) * MAP_CELL_SIZE);
 }
 
-// return center of the grid
-void map_get_center_pos(VECTOR *out)
+void get_map_center(int *x, int *y)
 {
-    vec_set(out, vector(-((GRID_MAX_X / 2) * ROOM_SIZE), -((GRID_MAX_Y / 2) * ROOM_SIZE), 0));
+    *x = integer(MAP_WIDTH / 2);
+    *y = integer(MAP_HEIGHT / 2);
 }
 
-// reset given tile
-int map_reset_tile(TILE *tile)
+void reset_tile(Tile *tile, int x, int y)
 {
     if (!tile)
-    {
-        diag("\nERROR in map_reset_tile! Tile doesn't exist");
-        return false;
-    }
+        return;
 
-    vec_set(&tile->pos, nullvector);
-
-    tile->id = -1;
-    tile->pos_x = -1;
-    tile->pos_y = -1;
+    tile->region = -1;
+    tile->x = x;
+    tile->y = y;
 
     tile->type = ROOM_NONE;
-    tile->secret_chance = 0;
 
     tile->doors = 0;
-    tile->up = false;
+    tile->top = false;
     tile->right = false;
     tile->bottom = false;
     tile->left = false;
 
+    tile->secret_chance = 0;
     tile->secret_doors = 0;
-    tile->secret_up = false;
+    tile->secret_top = false;
     tile->secret_right = false;
     tile->secret_bottom = false;
     tile->secret_left = false;
-
-    return true;
 }
 
-// reset the map
-void map_reset_all()
+void map_reset()
 {
-    created_rooms = 0; // no rooms yet created
-
-    start_room_tile = NULL;
-    boss_room_tile = NULL;
-    shop_room_tile = NULL;
-    super_secret_room_tile = NULL;
-
-    int i = 0, j = 0;
-    for (i = 0; i < GRID_MAX_X; i++)
-    {
-        for (j = 0; j < GRID_MAX_Y; j++)
-        {
-            vec_set(&map[i][j].pos, vector(-ROOM_SIZE * i, -ROOM_SIZE * j, 0));
-
-            map[i][j].id = -1;
-            map[i][j].pos_x = i;
-            map[i][j].pos_y = j;
-
-            map[i][j].type = ROOM_NONE;
-            map[i][j].secret_chance = 0;
-
-            map[i][j].doors = 0;
-            map[i][j].up = false;
-            map[i][j].right = false;
-            map[i][j].bottom = false;
-            map[i][j].left = false;
-
-            map[i][j].secret_doors = 0;
-            map[i][j].secret_up = false;
-            map[i][j].secret_right = false;
-            map[i][j].secret_bottom = false;
-            map[i][j].secret_left = false;
-        }
-    }
+    int x = 0, y = 0;
+    for (y = 0; y < MAP_HEIGHT; y++)
+        for (x = 0; x < MAP_WIDTH; x++)
+            reset_tile(&map[x][y], x, y);
 }
 
-// visualize the map for debugging
-void map_draw_debug()
-{
-    var tile_size_factor = 0.25;
-
-    int i = 0, j = 0;
-    for (i = 0; i < GRID_MAX_X; i++)
-    {
-        for (j = 0; j < GRID_MAX_Y; j++)
-        {
-            VECTOR pos;
-            vec_set(&pos, &map[i][j].pos);
-
-            int type = map[i][j].type;
-            switch (type)
-            {
-            case ROOM_NONE:
-                draw_point3d(&pos, vector(0, 0, 0), 25, ROOM_SIZE * tile_size_factor); // black
-                break;
-
-            case ROOM_NORMAL:
-                draw_point3d(&pos, vector(255, 255, 255), 100, ROOM_SIZE * tile_size_factor); // white
-                break;
-
-            case ROOM_START:
-                draw_point3d(&pos, vector(0, 255, 0), 100, ROOM_SIZE * tile_size_factor); // green
-                break;
-
-            case ROOM_BOSS:
-                draw_point3d(&pos, vector(0, 0, 255), 100, ROOM_SIZE * tile_size_factor); // red
-                break;
-
-            case ROOM_SHOP:
-                draw_point3d(&pos, vector(255, 0, 255), 100, ROOM_SIZE * tile_size_factor); // purple
-                break;
-
-            case ROOM_ITEM:
-                draw_point3d(&pos, vector(255, 0, 0), 100, ROOM_SIZE * tile_size_factor); // blue
-                break;
-
-            case ROOM_SECRET:
-                draw_point3d(&pos, vector(128, 128, 128), 100, ROOM_SIZE * tile_size_factor); // dark grey
-                break;
-
-            case ROOM_SUPER_SECRET:
-                draw_point3d(&pos, vector(64, 128, 255), 100, ROOM_SIZE * tile_size_factor); // yellow
-                break;
-            }
-
-            // show secret room spawning chances
-            if (vec_to_screen(&pos, camera))
-            {
-                draw_text(str_for_int(NULL, map[i][j].secret_chance), pos.x - 4, pos.y - 4, COLOR_RED);
-            }
-        }
-    }
-}
-
-// add given tile to the given list
-int map_add_tile_to_list(TILE *tile, List *list)
+void room_create(Tile *tile, int type)
 {
     if (!tile)
-    {
-        diag("\nERROR in map_add_tile_to_list! Tile doesn't exist");
-        return false;
-    }
-
-    if (!list)
-    {
-        diag("\nERROR in map_add_tile_to_list! List doesn't exist");
-        return false;
-    }
-
-    if (list_contains(list, tile) == true)
-    {
-        diag("\nERROR in map_add_tile_to_list! Tile is already in the given list!");
-        return false;
-    }
-
-    list_add(list, tile);
-    return true;
-}
-
-// clear the given list
-void map_clear_list(List *list)
-{
-    if (!list)
-    {
-        diag("\nERROR in map_clear_list! List doesn't exist");
         return;
-    }
 
-    list_clear(list);
-}
-
-// clear all lists
-void map_clear_lists_all()
-{
-    map_clear_list(&rooms_queue_list);
-    map_clear_list(&end_rooms_list);
-    map_clear_list(&item_rooms_list);
-    map_clear_list(&secret_rooms_list);
-    map_clear_list(&secret_position_list);
-    map_clear_list(&super_position_list);
-}
-
-// find and return starting room
-TILE *map_get_starting_room()
-{
-    // find the starting room (at the center of the grid)
-    VECTOR pos;
-    map_get_center_pos(&pos);
-
-    // find tile position from the world3d position
-    int i = 0, j = 0;
-    i = floor(-pos.x / ROOM_SIZE);
-    i = clamp(i, -1, GRID_MAX_X);
-    j = floor(-pos.y / ROOM_SIZE);
-    j = clamp(j, -1, GRID_MAX_Y);
-
-    return &map[i][j];
-}
-
-// return pos_x and pos_y of the given tile
-// pos_x and pos_y will receive the position
-void map_return_pos_x_y(TILE *tile, int *pos_x, int *pos_y)
-{
-    if (!tile)
-    {
-        diag("\nERROR in map_return_pos_x_y! Tile doesn't exist!");
-        return false;
-    }
-
-    int i = 0, j = 0;
-    i = floor(-tile->pos.x / ROOM_SIZE);
-    i = clamp(i, -1, GRID_MAX_X);
-    j = floor(-tile->pos.y / ROOM_SIZE);
-    j = clamp(j, -1, GRID_MAX_Y);
-
-    *pos_x = i;
-    *pos_y = j;
-}
-
-// create room at the given tile with the given params
-int map_create_room(TILE *tile, int type)
-{
-    if (!tile)
-    {
-        diag("\nERROR in map_create_room! Tile doesn't exist!");
-        return false;
-    }
+    array_add(rooms_queue_list, tile);
 
     tile->type = type;
-    tile->id = created_rooms;
-    created_rooms++;
-    map_add_tile_to_list(tile, &rooms_queue_list);
+    tile->region = array_size(rooms_queue_list);
 }
 
-// return amount of rooms currently given tile is bordering with !
-// this is differnet from 'doors' counter, because 'doors' counter shows connections with other rooms
-// while this one looks for bordering with rooms, even if they aren't connected (f.e. to find end rooms)
-int count_bordering_rooms(TILE *tile)
+int count_bordering_rooms(Tile *tile)
 {
     if (!tile)
-    {
-        diag("\nERROR in count_bordering_rooms! Tile doesn't exist!");
         return false;
-    }
 
-    // given tile's position on the grid
-    int pos_x = 0, pos_y = 0;
-    map_return_pos_x_y(tile, &pos_x, &pos_y);
+    int x = tile->x;
+    int y = tile->y;
 
-    // from start we think that all 4 sides are occupied with other rooms
-    int counter = 4;
-    if (map[pos_x - 1][pos_y].type == ROOM_NONE)
+    int n = 0, counter = 4;
+    for (n = 0; n < CARDINAL_DIRECTIONS; n++)
     {
-        counter--;
-    }
-    if (map[pos_x][pos_y + 1].type == ROOM_NONE)
-    {
-        counter--;
-    }
-    if (map[pos_x + 1][pos_y].type == ROOM_NONE)
-    {
-        counter--;
-    }
-    if (map[pos_x][pos_y - 1].type == ROOM_NONE)
-    {
+        int nx = x + cardinal_dir[n].x;
+        int ny = y + cardinal_dir[n].y;
+        if (!is_in_map(nx, ny))
+            continue;
+
+        if (map[nx][ny].type != ROOM_NONE)
+            continue;
+
         counter--;
     }
 
     return counter;
 }
 
-// check if room has same neighbours or not (ignoring ROOM_NONE)
-int map_room_all_same_neighbours(TILE *tile)
+int is_valid_neighbour(Tile *neighbour)
 {
-    if (!tile)
-    {
-        diag("\nERROR in map_room_all_same_neighbours! Tile doesn't exist");
+    if (!neighbour)
         return false;
-    }
 
-    int pos_x = 0, pos_y = 0;
-    map_return_pos_x_y(tile, &pos_x, &pos_y);
-
-    int i = 0;
-    int type[4];
-    int counter = 0;
-
-    for (i = 0; i < 4; i++)
-    {
-        type[i] = 0;
-    }
-
-    // up
-    if (map[pos_x - 1][pos_y].type != ROOM_NONE)
-    {
-        type[counter] = map[pos_x - 1][pos_y].type;
-        counter++;
-    }
-
-    // right
-    if (map[pos_x][pos_y + 1].type != ROOM_NONE)
-    {
-        type[counter] = map[pos_x][pos_y + 1].type;
-        counter++;
-    }
-
-    // bottom
-    if (map[pos_x + 1][pos_y].type != ROOM_NONE)
-    {
-        type[counter] = map[pos_x + 1][pos_y].type;
-        counter++;
-    }
-
-    // left
-    if (map[pos_x][pos_y - 1].type != ROOM_NONE)
-    {
-        type[counter] = map[pos_x][pos_y - 1].type;
-        counter++;
-    }
-
-    // not enough neighbours to compare...
-    if (counter <= 1)
-    {
+    if (neighbour->type != ROOM_NONE)
         return false;
-    }
 
-    int is_type_same = true;
-    int old_type = type[0];
-
-    // check if tiles are all the same
-    for (i = 0; i < counter; i++)
-    {
-        if (old_type != type[i])
-        {
-            is_type_same = false;
-        }
-    }
-
-    // so above is true ?
-    // that means that all tiles are the same...
-    // but we need to make sure, that they are not normal rooms !
-    if (old_type == ROOM_NORMAL)
-    {
-        is_type_same = false;
-    }
-
-    return is_type_same;
-}
-
-// can this room be added into the queue?
-int is_valid_room(TILE *tile)
-{
-    if (!tile)
-    {
-        diag("\nERROR in is_valid_room! Tile doesn't exist!");
+    if (count_bordering_rooms(neighbour) > 1)
         return false;
-    }
 
-    if (tile->type != ROOM_NONE)
-    {
+    if (array_size(rooms_queue_list) >= max_rooms)
         return false;
-    }
 
-    if (count_bordering_rooms(tile) > 1)
-    {
+    if (RANDOM_CHANCE(2))
         return false;
-    }
-
-    if (created_rooms >= max_rooms)
-    {
-        return false;
-    }
-
-    if (random(1) > 0.5)
-    {
-        return false;
-    }
 
     return true;
 }
 
-// find all end rooms (bordering with one 1 room + have only 1 door)
-int map_find_end_rooms()
+void map_add_rooms()
 {
-    // cycle though the queue of rooms
-    TILE *next_room = NULL;
-    ListIterator *it = list_begin_iterate(&rooms_queue_list);
-    for (next_room = list_iterate(it); it->hasNext; next_room = list_iterate(it))
-    {
-        // not a room at all ?
-        if (next_room->type != ROOM_NORMAL)
-        {
-            continue;
-        }
+    // add starting room to the queue
+    int start_x = -1, start_y = -1;
+    get_map_center(&start_x, &start_y);
+    if (!is_in_map(start_x, start_y))
+        return;
 
-        // too many doors ?
-        if (next_room->doors > 1)
-        {
-            continue;
-        }
+    room_create(&map[start_x][start_y], ROOM_START);
 
-        // make sure that there is no bordering rooms around 3 sides
-        // if so, then we've found our item room (single neighbour room)
-        if (count_bordering_rooms(next_room) <= 1)
-        {
-            map_add_tile_to_list(next_room, &end_rooms_list);
-        }
-    }
-    list_end_iterate(it);
-
-    // not enough end rooms were created ?
-    if (end_rooms_list.count < 3)
-    {
-        return false;
-    }
-    else
-    {
-        return true;
-    }
-}
-
-// find the boss fight room
-// return false is non was found, otherwise - true
-int map_find_boss_room()
-{
-    int pos_x = -1, pos_y = -1;
-    var farthest_distance = 0;
-
-    // cycle though the queue of rooms
-    TILE *next_room = NULL;
-    ListIterator *it = list_begin_iterate(&end_rooms_list);
-    for (next_room = list_iterate(it); it->hasNext; next_room = list_iterate(it))
-    {
-        // distance to the center of the starting room
-        var distance = vec_dist(&next_room->pos, &start_room_pos);
-
-        // far enough ?
-        if (distance > farthest_distance)
-        {
-            map_return_pos_x_y(next_room, &pos_x, &pos_y);
-            farthest_distance = distance; // save distance as the farthest one
-        }
-    }
-    list_end_iterate(it);
-
-    // boss room was found ?
-    if (pos_x != -1 && pos_y != -1)
-    {
-        map[pos_x][pos_y].type = ROOM_BOSS;
-        boss_room_tile = &map[pos_x][pos_y];
-    }
-
-    // make sure to return int
-    if (boss_room_tile == NULL)
-    {
-        return false;
-    }
-    else
-    {
-        return true;
-    }
-}
-
-// find shop room
-// return false is non was found, otherwise - true
-int map_find_shop_room()
-{
-    // cycle though the queue of rooms
-    TILE *next_room = NULL;
-
-    while (!shop_room_tile)
-    {
-        int index = integer(random(end_rooms_list.count));
-        next_room = list_item_at(&end_rooms_list, index);
-        if (boss_room_tile != next_room)
-        {
-            next_room->type = ROOM_SHOP;
-            shop_room_tile = next_room;
-        }
-    }
-
-    // make sure to return int
-    if (shop_room_tile == NULL)
-    {
-        return false;
-    }
-    else
-    {
-        return true;
-    }
-}
-
-// we cycle though the end rooms and first or all define 1 boss room, then 1 shop room
-// and then all the rest of end rooms are going to become item rooms !
-// return false is non was found or not all end rooms are filled, otherwise - true
-int map_find_item_rooms()
-{
-    // cycle though the queue of rooms
-    TILE *next_room = NULL;
-    ListIterator *it = list_begin_iterate(&end_rooms_list);
-    for (next_room = list_iterate(it); it->hasNext; next_room = list_iterate(it))
-    {
-        // ignore boss room !
-        if (next_room == boss_room_tile)
-        {
-            continue;
-        }
-
-        // ignore shop room !
-        if (next_room == shop_room_tile)
-        {
-            continue;
-        }
-
-        next_room->type = ROOM_ITEM;
-        map_add_tile_to_list(next_room, &item_rooms_list);
-    }
-    list_end_iterate(it);
-
-    // make sure to return int
-    if (item_rooms_list.count != (end_rooms_list.count - 2))
-    {
-        return false;
-    }
-    else
-    {
-        return true;
-    }
-}
-
-// check if given tile should be added into the secret level spawning position
-int is_valid_secret_pos(TILE *tile)
-{
-    if (!tile)
-    {
-        diag("\nERROR in is_valid_secret_pos! Given tile doesn't exist");
-        return false;
-    }
-
-    // already occupied ?
-    if (tile->type != ROOM_NONE)
-    {
-        return false;
-    }
-
-    // not enough chances
-    if (tile->secret_chance <= 0)
-    {
-        return false;
-    }
-
-    // was already added into the list ?
-    if (list_contains(&secret_position_list, tile) == true)
-    {
-        return false;
-    }
-
-    return true;
-}
-
-// calculate chances for all empty tiles to spawn secret on the best tiles
-// bordered with 3 rooms, or with at least 2
-void map_calculate_secret_pos_chance()
-{
     // cycle though the queue
-    TILE *next_room = NULL;
-    ListIterator *it = list_begin_iterate(&rooms_queue_list);
-    for (next_room = list_iterate(it); it->hasNext; next_room = list_iterate(it))
+    array_enumerate_begin(Tile *, rooms_queue_list, v)
     {
-        int pos_x = -1, pos_y = -1;
-        map_return_pos_x_y(next_room, &pos_x, &pos_y);
+        if (!v)
+            continue;
 
-        // up
-        if (map[pos_x - 1][pos_y].type == ROOM_NONE)
+        int x = v->x;
+        int y = v->y;
+
+        int n = 0;
+        for (n = 0; n < CARDINAL_DIRECTIONS; n++)
         {
-            map[pos_x - 1][pos_y].secret_chance++;
-            if (is_valid_secret_pos(&map[pos_x - 1][pos_y]) == true)
+            int nx = x + cardinal_dir[n].x;
+            int ny = y + cardinal_dir[n].y;
+            if (!is_in_map(nx, ny))
+                continue;
+
+            Tile *neighbour = &map[nx][ny];
+            if (!neighbour)
+                continue;
+
+            if (!is_valid_neighbour(neighbour))
+                continue;
+
+            v->doors++;
+            neighbour->doors++;
+
+            switch (n)
             {
-                map_add_tile_to_list(&map[pos_x - 1][pos_y], &secret_position_list);
-            }
-        }
+            case CARDINAL_TOP:
+                v->top = true;
+                neighbour->bottom = true;
+                break;
 
-        // right
-        if (map[pos_x][pos_y + 1].type == ROOM_NONE)
-        {
-            map[pos_x][pos_y + 1].secret_chance++;
-            if (is_valid_secret_pos(&map[pos_x][pos_y + 1]) == true)
-            {
-                map_add_tile_to_list(&map[pos_x][pos_y + 1], &secret_position_list);
-            }
-        }
+            case CARDINAL_RIGHT:
+                v->right = true;
+                neighbour->left = true;
+                break;
 
-        // bottom
-        if (map[pos_x + 1][pos_y].type == ROOM_NONE)
-        {
-            map[pos_x + 1][pos_y].secret_chance++;
-            if (is_valid_secret_pos(&map[pos_x + 1][pos_y]) == true)
-            {
-                map_add_tile_to_list(&map[pos_x + 1][pos_y], &secret_position_list);
-            }
-        }
+            case CARDINAL_BOTTOM:
+                v->bottom = true;
+                neighbour->top = true;
+                break;
 
-        // left
-        if (map[pos_x][pos_y - 1].type == ROOM_NONE)
-        {
-            map[pos_x][pos_y - 1].secret_chance++;
-            if (is_valid_secret_pos(&map[pos_x][pos_y - 1]) == true)
-            {
-                map_add_tile_to_list(&map[pos_x][pos_y - 1], &secret_position_list);
-            }
-        }
-    }
-    list_end_iterate(it);
-}
-
-// check for the secret room's neighbour to see if we can connect to it or not
-int is_valid_secret_neighbours(TILE *tile)
-{
-    if (!tile)
-    {
-        diag("\nERROR in is_valid_secret_neighbours! Tile doesn't exist");
-        return false;
-    }
-
-    // don't point into the void...
-    if (tile->type == ROOM_NONE)
-    {
-        return false;
-    }
-
-    // don't point into the boss room
-    // ignore boss room
-    if (tile->type == ROOM_BOSS)
-    {
-        return false;
-    }
-
-    // or into the super secret !
-    if (tile->type == ROOM_SUPER_SECRET)
-    {
-        return false;
-    }
-
-    return true;
-}
-
-// find secret rooms
-// return false is non was found, otherwise - true
-int map_find_secret_rooms()
-{
-    // we sort this like this (by hand)...
-    // ugly but works and not super slow, so it's kinda ok
-    // first we try to occupy all tiles with secret chance 4
-    int i = 0;
-    for (i = 0; i < 4; i++)
-    {
-        // enough secret rooms ?
-        if (secret_rooms_list.count >= max_secrets)
-        {
-            break;
-        }
-
-        TILE *next_room = NULL;
-        ListIterator *it = list_begin_iterate(&secret_position_list);
-        for (next_room = list_iterate(it); it->hasNext; next_room = list_iterate(it))
-        {
-            // enough secret rooms ?
-            if (secret_rooms_list.count >= max_secrets)
-            {
+            case CARDINAL_LEFT:
+                v->left = true;
+                neighbour->right = true;
                 break;
             }
 
-            // make sure that we don't spawn between all same kind of tiles (f.e. only between item rooms)
-            // maybe this isn't really needed, but we'll leave this like this for now
-            if (map_room_all_same_neighbours(next_room) == true)
-            {
-                continue;
-            }
-
-            // not enough chance ?
-            // 4, 3, 2
-            if (next_room->secret_chance != 4 - i)
-            {
-                continue;
-            }
-
-            // add into the secret list
-            map_add_tile_to_list(next_room, &secret_rooms_list);
-        }
-        list_end_iterate(it);
-    }
-
-    // cycle though the secret rooms and set their connections
-    TILE *next_room = NULL;
-    ListIterator *it = list_begin_iterate(&secret_rooms_list);
-    for (next_room = list_iterate(it); it->hasNext; next_room = list_iterate(it))
-    {
-        int pos_x = 0, pos_y = 0;
-        map_return_pos_x_y(next_room, &pos_x, &pos_y);
-
-        // we finally found the secret room...
-        next_room->type = ROOM_SECRET;
-
-        // up neighbour
-        if (is_valid_secret_neighbours(&map[pos_x - 1][pos_y]) == true)
-        {
-            map[pos_x - 1][pos_y].secret_bottom = true;
-            map[pos_x - 1][pos_y].secret_doors++;
-
-            next_room->up = true;
-            next_room->doors++;
-        }
-
-        // right neighbour
-        if (is_valid_secret_neighbours(&map[pos_x][pos_y + 1]) == true)
-        {
-            map[pos_x][pos_y + 1].secret_left = true;
-            map[pos_x][pos_y + 1].secret_doors++;
-
-            next_room->right = true;
-            next_room->doors++;
-        }
-
-        // bottom neighbour
-        if (is_valid_secret_neighbours(&map[pos_x + 1][pos_y]) == true)
-        {
-            map[pos_x + 1][pos_y].secret_up = true;
-            map[pos_x + 1][pos_y].secret_doors++;
-
-            next_room->bottom = true;
-            next_room->doors++;
-        }
-
-        // left neighbour
-        if (is_valid_secret_neighbours(&map[pos_x][pos_y - 1]) == true)
-        {
-            map[pos_x][pos_y - 1].secret_right = true;
-            map[pos_x][pos_y - 1].secret_doors++;
-
-            next_room->left = true;
-            next_room->doors++;
+            room_create(neighbour, ROOM_NORMAL);
         }
     }
-    list_end_iterate(it);
-
-    // make sure to return int
-    if (secret_rooms_list.count < max_secrets)
-    {
-        return false;
-    }
-    else
-    {
-        return true;
-    }
+    array_enumerate_end(rooms_queue_list);
 }
 
-// check if neighbours of the given tile are normal rooms
-// false - if they are not, otherwise - true
-int is_valid_super_secret_neighbour(TILE *tile)
+void map_add_tile_to_array(Tile *tile, Array *array)
+{
+    if (!tile || !array)
+        return;
+
+    array_add(array, tile);
+}
+
+void map_find_end_rooms()
+{
+    array_enumerate_begin(Tile *, rooms_queue_list, v)
+    {
+        if (!v)
+            continue;
+
+        if (v->type != ROOM_NORMAL)
+            continue;
+
+        if (v->doors > 1)
+            continue;
+
+        if (count_bordering_rooms(v) > 1)
+            continue;
+
+        map_add_tile_to_array(v, end_rooms_list);
+    }
+    array_enumerate_end(rooms_queue_list);
+}
+
+var get_distance(int x1, int y1, int x2, int y2)
+{
+    VECTOR start, end;
+    vec_set(&start, vector(x1 * MAP_CELL_SIZE, y1 * MAP_CELL_SIZE, 0));
+    vec_set(&end, vector(x2 * MAP_CELL_SIZE, y2 * MAP_CELL_SIZE, 0));
+    return vec_dist(&start, &end);
+}
+
+void map_find_boss_room()
+{
+    int x = -1, y = -1;
+    var farthest_distance = 0;
+
+    int start_x = -1, start_y = -1;
+    get_map_center(&start_x, &start_y);
+    if (!is_in_map(start_x, start_y))
+        return;
+
+    array_enumerate_begin(Tile *, end_rooms_list, v)
+    {
+        if (!v)
+            continue;
+
+        var dist = get_distance(v->x, v->y, start_x, start_y);
+
+        if (dist >= farthest_distance)
+        {
+            x = v->x;
+            y = v->y;
+            farthest_distance = dist;
+        }
+    }
+    array_enumerate_end(end_rooms_list);
+
+    if (x != -1 && y != -1)
+        boss_room_found = true;
+
+    if (boss_room_found == true)
+        map[x][y].type = ROOM_BOSS;
+}
+
+void map_find_shop_room()
+{
+    int start_x = -1, start_y = -1;
+    get_map_center(&start_x, &start_y);
+    if (!is_in_map(start_x, start_y))
+        return;
+
+    int x = -1, y = -1;
+    Tile *temp_tile = array_first(Tile *, end_rooms_list);
+    if (!temp_tile)
+        return;
+
+    var closest_distance = get_distance(temp_tile->x, temp_tile->y, start_x, start_y);
+
+    array_enumerate_begin(Tile *, end_rooms_list, v)
+    {
+        if (!v)
+            continue;
+
+        if (v->type != ROOM_NORMAL)
+            continue;
+
+        var dist = get_distance(v->x, v->y, start_x, start_y);
+        if (dist <= closest_distance)
+        {
+            x = v->x;
+            y = v->y;
+            closest_distance = dist;
+        }
+    }
+    array_enumerate_end(end_rooms_list);
+
+    if (x != -1 && y != -1)
+        shop_room_found = true;
+
+    if (shop_room_found == true)
+        map[x][y].type = ROOM_SPECIAL;
+}
+
+void map_find_item_rooms()
+{
+    array_enumerate_begin(Tile *, end_rooms_list, v)
+    {
+        if (!v)
+            continue;
+
+        if (v->type != ROOM_NORMAL)
+            continue;
+
+        v->type = ROOM_LOCKED;
+
+        created_item_rooms++;
+        if (created_item_rooms >= max_item_rooms)
+            break;
+    }
+    array_enumerate_end(end_rooms_list);
+}
+
+int map_secret_position_contains(Tile *tile)
 {
     if (!tile)
-    {
-        diag("\nERROR in is_valid_super_secret_neighbour! Tile doesn't exist");
         return false;
-    }
 
-    int pos_x = 0, pos_y = 0;
-    map_return_pos_x_y(tile, &pos_x, &pos_y);
-
-    int i = 0;
-    int type[4];
-    int counter = 0;
-
-    for (i = 0; i < 4; i++)
+    int found = false;
+    array_enumerate_begin(Tile *, secret_positions_list, v)
     {
-        type[i] = 0;
+        if (!v)
+            continue;
+
+        if (found)
+            break;
+
+        if (v->x == tile->x && v->y == tile->y)
+            found = true;
     }
-
-    // up
-    if (map[pos_x - 1][pos_y].type != ROOM_NONE)
-    {
-        type[counter] = map[pos_x - 1][pos_y].type;
-        counter++;
-    }
-
-    // right
-    if (map[pos_x][pos_y + 1].type != ROOM_NONE)
-    {
-        type[counter] = map[pos_x][pos_y + 1].type;
-        counter++;
-    }
-
-    // bottom
-    if (map[pos_x + 1][pos_y].type != ROOM_NONE)
-    {
-        type[counter] = map[pos_x + 1][pos_y].type;
-        counter++;
-    }
-
-    // left
-    if (map[pos_x][pos_y - 1].type != ROOM_NONE)
-    {
-        type[counter] = map[pos_x][pos_y - 1].type;
-        counter++;
-    }
-
-    int is_type_same = true;
-    int old_type = ROOM_NORMAL;
-
-    // check if tiles are all the same
-    for (i = 0; i < counter; i++)
-    {
-        if (old_type != type[i])
-        {
-            is_type_same = false;
-        }
-    }
-
-    return is_type_same;
+    array_enumerate_end(secret_positions_list);
+    return found;
 }
 
-// find super secret room !
-int map_find_super_secret_room()
+int map_normal_neighbour_counter(int x, int y, int type)
 {
-    TILE *next_room = NULL;
-    ListIterator *it = list_begin_iterate(&secret_position_list);
-    for (next_room = list_iterate(it); it->hasNext; next_room = list_iterate(it))
-    {
-        // make sure to find places with only one secret chance !
-        if (next_room->secret_chance != 1)
-        {
-            continue;
-        }
-
-        // make sure that it's bordering with only one room
-        if (count_bordering_rooms(next_room) > 1)
-        {
-            continue;
-        }
-
-        // also make sure that that single room we are next to is a normal room !
-        if (is_valid_super_secret_neighbour(next_room) == false)
-        {
-            continue;
-        }
-
-        // add into the secret list
-        map_add_tile_to_list(next_room, &super_position_list);
-    }
-    list_end_iterate(it);
-
-    // no positions were found ?
-    if (super_position_list.count <= 0)
-    {
+    if (!is_in_map(x, y))
         return false;
-    }
 
-    // random index from the available super secret room positions
-    int index = integer(random(super_position_list.count));
-
-    // find the proper tile from the list
-    TILE *tile = list_item_at(&super_position_list, index);
-    tile->type = ROOM_SUPER_SECRET;
-
-    int pos_x = 0, pos_y = 0;
-    map_return_pos_x_y(tile, &pos_x, &pos_y);
-
-    // update connection with the map
-    // up neighbour
-    if (is_valid_secret_neighbours(&map[pos_x - 1][pos_y]) == true)
+    int n = 0, counter = 0;
+    for (n = 0; n < CARDINAL_DIRECTIONS; n++)
     {
-        map[pos_x - 1][pos_y].secret_bottom = true;
-        map[pos_x - 1][pos_y].secret_doors++;
+        int nx = x + cardinal_dir[n].x;
+        int ny = y + cardinal_dir[n].y;
+        if (!is_in_map(nx, ny))
+            continue;
 
-        tile->up = true;
-        tile->doors++;
+        Tile *neighbour = &map[nx][ny];
+        if (!neighbour)
+            continue;
+
+        if (neighbour->type != type)
+            continue;
+
+        counter++;
     }
 
-    // right neighbour
-    if (is_valid_secret_neighbours(&map[pos_x][pos_y + 1]) == true)
-    {
-        map[pos_x][pos_y + 1].secret_left = true;
-        map[pos_x][pos_y + 1].secret_doors++;
+    return counter;
+}
 
-        tile->right = true;
-        tile->doors++;
-    }
+int map_valid_secret_position(Tile *tile)
+{
+    if (!tile)
+        return false;
 
-    // bottom neighbour
-    if (is_valid_secret_neighbours(&map[pos_x + 1][pos_y]) == true)
-    {
-        map[pos_x + 1][pos_y].secret_up = true;
-        map[pos_x + 1][pos_y].secret_doors++;
+    if (tile->type != ROOM_NONE)
+        return false;
 
-        tile->bottom = true;
-        tile->doors++;
-    }
+    if (tile->secret_chance <= 0)
+        return false;
 
-    // left neighbour
-    if (is_valid_secret_neighbours(&map[pos_x][pos_y - 1]) == true)
-    {
-        map[pos_x][pos_y - 1].secret_right = true;
-        map[pos_x][pos_y - 1].secret_doors++;
+    if (map_secret_position_contains(tile))
+        return false;
 
-        tile->left = true;
-        tile->doors++;
-    }
+    if (map_normal_neighbour_counter(tile->x, tile->y, ROOM_NORMAL) <= 0)
+        return false;
+
+    if (map_normal_neighbour_counter(tile->x, tile->y, ROOM_BOSS) > 0)
+        return false;
 
     return true;
 }
 
-// generate new map
+void map_find_secret_positions()
+{
+    array_enumerate_begin(Tile *, rooms_queue_list, v)
+    {
+        if (!v)
+            continue;
+
+        if (v->type == ROOM_START || v->type == ROOM_BOSS)
+            continue;
+
+        int x = v->x;
+        int y = v->y;
+
+        int n = 0;
+        for (n = 0; n < CARDINAL_DIRECTIONS; n++)
+        {
+            int nx = x + cardinal_dir[n].x;
+            int ny = y + cardinal_dir[n].y;
+            if (!is_in_map(nx, ny))
+                continue;
+
+            Tile *neighbour = &map[nx][ny];
+            if (!neighbour)
+                continue;
+
+            if (neighbour->type != ROOM_NONE)
+                continue;
+
+            neighbour->secret_chance++;
+
+            if (!map_valid_secret_position(neighbour))
+                continue;
+
+            array_add(secret_positions_list, neighbour);
+        }
+    }
+    array_enumerate_end(rooms_queue_list);
+}
+
+int is_secret_already_added(Tile *tile)
+{
+    if (!tile)
+        return false;
+
+    int found = false;
+    array_enumerate_begin(Tile *, secret_rooms_list, v)
+    {
+        if (!v)
+            continue;
+
+        if (found)
+            break;
+
+        if (v->x == tile->x && v->y == tile->y)
+            found = true;
+    }
+    array_enumerate_end(secret_rooms_list);
+
+    return found;
+}
+
+int is_valid_secret_neighbour(Tile *tile)
+{
+    if (!tile)
+        return false;
+
+    if (tile->type == ROOM_NONE || tile->type == ROOM_BOSS || tile->type == ROOM_SECRET || tile->type == ROOM_SUPER_SECRET)
+        return false;
+
+    return true;
+}
+
+void map_add_secret_rooms()
+{
+    var lifespan = 1;
+    while (lifespan > 0)
+    {
+        lifespan -= time_frame / 16;
+
+        int highest_chance = 0, x = -1, y = -1;
+        array_enumerate_begin(Tile *, secret_positions_list, v)
+        {
+            if (!v)
+                continue;
+
+            if (v->type != ROOM_NONE)
+                continue;
+
+            if (v->secret_chance < highest_chance)
+                continue;
+
+            if (is_secret_already_added(v))
+                continue;
+
+            x = v->x;
+            y = v->y;
+            highest_chance = v->secret_chance;
+        }
+        array_enumerate_end(secret_positions_list);
+
+        if (x != -1 && y != -1)
+            array_add(secret_rooms_list, &map[x][y]);
+
+        if (array_size(secret_rooms_list) >= max_secrets)
+            break;
+    }
+
+    array_enumerate_begin(Tile *, secret_rooms_list, v)
+    {
+        if (!v)
+            continue;
+
+        v->type = ROOM_SECRET;
+        v->region = 0;
+
+        int x = v->x;
+        int y = v->y;
+
+        int n = 0;
+        for (n = 0; n < CARDINAL_DIRECTIONS; n++)
+        {
+            int nx = x + cardinal_dir[n].x;
+            int ny = y + cardinal_dir[n].y;
+            if (!is_in_map(nx, ny))
+                continue;
+
+            Tile *neighbour = &map[nx][ny];
+            if (!neighbour)
+                continue;
+
+            if (!is_valid_secret_neighbour(neighbour))
+                continue;
+
+            v->doors++;
+            neighbour->secret_doors++;
+
+            switch (n)
+            {
+            case CARDINAL_TOP:
+                neighbour->secret_bottom = true;
+                v->top = true;
+                break;
+
+            case CARDINAL_RIGHT:
+                neighbour->secret_left = true;
+                v->right = true;
+                break;
+
+            case CARDINAL_BOTTOM:
+                neighbour->secret_top = true;
+                v->bottom = true;
+                break;
+
+            case CARDINAL_LEFT:
+                neighbour->secret_right = true;
+                v->left = true;
+                break;
+            }
+        }
+
+        created_secret_rooms++;
+        if (created_secret_rooms >= max_secrets)
+            break;
+    }
+    array_enumerate_end(secret_rooms_list);
+}
+
+int is_valid_super_secret_neighbour(Tile *tile)
+{
+    if (!tile)
+        return false;
+}
+
+void map_add_super_secret_positions()
+{
+    array_enumerate_begin(Tile *, secret_positions_list, v)
+    {
+        if (!v)
+            continue;
+
+        if (v->secret_chance != 1)
+            continue;
+
+        if (count_bordering_rooms(v) > 1)
+            continue;
+
+        int x = v->x;
+        int y = v->y;
+
+        int n = 0, counter = 0;
+        for (n = 0; n < CARDINAL_DIRECTIONS; n++)
+        {
+            int nx = x + cardinal_dir[n].x;
+            int ny = y + cardinal_dir[n].y;
+            if (!is_in_map(nx, ny))
+                continue;
+
+            Tile *neighbour = &map[nx][ny];
+            if (!neighbour)
+                continue;
+
+            if (neighbour->type == ROOM_NONE)
+                continue;
+
+            if (neighbour->type != ROOM_NORMAL)
+                continue;
+
+            counter++;
+        }
+
+        if (counter <= 0)
+            continue;
+
+        array_add(super_positions_list, v);
+    }
+    array_enumerate_end(secret_positions_list);
+}
+
+void map_add_super_secret_room()
+{
+    int index = RANDOM_RANGE(0, array_size(super_positions_list));
+    Tile *super_secret_room = array_get_at(Tile *, super_positions_list, index);
+    if (!super_secret_room)
+        return;
+
+    super_secret_room->type = ROOM_SUPER_SECRET;
+    super_secret_room->region = 0;
+
+    int x = super_secret_room->x;
+    int y = super_secret_room->y;
+
+    int n = 0, counter = 0;
+    for (n = 0; n < CARDINAL_DIRECTIONS; n++)
+    {
+        int nx = x + cardinal_dir[n].x;
+        int ny = y + cardinal_dir[n].y;
+        if (!is_in_map(nx, ny))
+            continue;
+
+        Tile *neighbour = &map[nx][ny];
+        if (!neighbour)
+            continue;
+
+        if (neighbour->type != ROOM_NORMAL)
+            continue;
+
+        super_secret_room->doors++;
+        neighbour->secret_doors++;
+
+        switch (n)
+        {
+        case CARDINAL_TOP:
+            neighbour->secret_bottom = true;
+            super_secret_room->top = true;
+            break;
+
+        case CARDINAL_RIGHT:
+            neighbour->secret_left = true;
+            super_secret_room->right = true;
+            break;
+
+        case CARDINAL_BOTTOM:
+            neighbour->secret_top = true;
+            super_secret_room->bottom = true;
+            break;
+
+        case CARDINAL_LEFT:
+            neighbour->secret_right = true;
+            super_secret_room->left = true;
+            break;
+        }
+    }
+}
+
 void map_generate()
 {
-    // random amount of max_room per each generation
-    max_rooms = (integer(random(3)) + 4 + level_id * 2); // * 2;
+    if ((MAP_WIDTH % 2) == false || (MAP_HEIGHT % 2) == false)
+        return;
 
-    // max 1 - 2 secret room per level
-    max_secrets = 1 + integer(random(2));
+    max_rooms = RANDOM_RANGE(0, 2) + 5 + minv(level_id, max_level_id) * 2.6;
 
-    // clear all previous maps
-    map_reset_all();
+    if (level_id == 0)
+    {
+        max_secrets = 1;
+        max_item_rooms = 1;
+    }
+    else
+    {
+        max_secrets = RANDOM_RANGE(0, 2) + 1;
+        max_item_rooms = RANDOM_RANGE(0, 2) + 1;
+    }
 
-    // clear all previous data from the lists
-    map_clear_lists_all();
+    created_item_rooms = 0;
+    created_secret_rooms = 0;
 
-    // this part is needed for removing created room tiles
+    boss_room_found = false;
+    shop_room_found = false;
+    super_secret_created = false;
+
+    map_reset();
+
+    array_destroy(rooms_queue_list);
+    array_destroy(end_rooms_list);
+    array_destroy(secret_positions_list);
+    array_destroy(secret_rooms_list);
+    array_destroy(super_positions_list);
+
+    rooms_queue_list = array_create(Tile *);
+    end_rooms_list = array_create(Tile *);
+    secret_positions_list = array_create(Tile *);
+    secret_rooms_list = array_create(Tile *);
+    super_positions_list = array_create(Tile *);
+
     level_load("");
-    wait(1);
-    VECTOR pos;
-    map_get_center_pos(&pos);
-    vec_set(&camera->x, vector(pos.x, pos.y, 1000));
-    vec_set(&camera->pan, vector(0, -90, 0));
 
-    // add starting room to the queue
-    TILE *starting_room = map_get_starting_room();
-    vec_set(&start_room_pos, &starting_room->pos);
-    map_create_room(starting_room, ROOM_START);
-    start_room_tile = starting_room;
-
-    // cycle though the queue
-    TILE *next_room = NULL;
-    ListIterator *it = list_begin_iterate(&rooms_queue_list);
-    for (next_room = list_iterate(it); it->hasNext; next_room = list_iterate(it))
+    map_add_rooms();
+    wait_for(map_add_rooms);
+    if (array_size(rooms_queue_list) != max_rooms)
     {
-        int pos_x = 0, pos_y = 0;
-        map_return_pos_x_y(next_room, &pos_x, &pos_y);
+        map_generate();
+        return;
+    }
 
-        // up neighbour
-        if (is_valid_room(&map[pos_x - 1][pos_y]) == true)
+    map_find_end_rooms();
+    wait_for(map_find_end_rooms);
+    if (array_size(end_rooms_list) < 2 + max_item_rooms)
+    {
+        map_generate();
+        return;
+    }
+
+    map_find_boss_room();
+    wait_for(map_find_boss_room);
+    if (!boss_room_found)
+    {
+        map_generate();
+        return;
+    }
+
+    map_find_shop_room();
+    wait_for(map_find_shop_room);
+    if (!shop_room_found)
+    {
+        map_generate();
+        return;
+    }
+
+    map_find_item_rooms();
+    wait_for(map_find_item_rooms);
+
+    map_find_secret_positions();
+    wait_for(map_find_secret_positions);
+    if (array_size(secret_positions_list) < max_secrets)
+    {
+        map_generate();
+        return;
+    }
+
+    map_add_secret_rooms();
+    wait_for(map_add_secret_rooms);
+    if (created_secret_rooms != max_secrets)
+    {
+        map_generate();
+        return;
+    }
+
+    map_add_super_secret_positions();
+    wait_for(map_add_super_secret_positions);
+    if (array_size(super_positions_list) <= 0)
+    {
+        map_generate();
+        return;
+    }
+
+    map_add_super_secret_room();
+    wait_for(map_add_super_secret_room);
+
+    beep();
+}
+
+void map_draw(int pos_x, int pos_y)
+{
+    int x = 0, y = 0;
+    for (y = 0; y < MAP_HEIGHT; y++)
+    {
+        for (x = 0; x < MAP_WIDTH; x++)
         {
-            map_create_room(&map[pos_x - 1][pos_y], ROOM_NORMAL);
-            map[pos_x - 1][pos_y].bottom = true;
-            map[pos_x - 1][pos_y].doors++;
-
-            next_room->up = true;
-            next_room->doors++;
-        }
-
-        // right neighbour
-        if (is_valid_room(&map[pos_x][pos_y + 1]) == true)
-        {
-            map_create_room(&map[pos_x][pos_y + 1], ROOM_NORMAL);
-            map[pos_x][pos_y + 1].left = true;
-            map[pos_x][pos_y + 1].doors++;
-
-            next_room->right = true;
-            next_room->doors++;
-        }
-
-        // bottom neighbour
-        if (is_valid_room(&map[pos_x + 1][pos_y]) == true)
-        {
-            map_create_room(&map[pos_x + 1][pos_y], ROOM_NORMAL);
-            map[pos_x + 1][pos_y].up = true;
-            map[pos_x + 1][pos_y].doors++;
-
-            next_room->bottom = true;
-            next_room->doors++;
-        }
-
-        // left neighbour
-        if (is_valid_room(&map[pos_x][pos_y - 1]) == true)
-        {
-            map_create_room(&map[pos_x][pos_y - 1], ROOM_NORMAL);
-            map[pos_x][pos_y - 1].right = true;
-            map[pos_x][pos_y - 1].doors++;
-
-            next_room->left = true;
-            next_room->doors++;
-        }
-    }
-    list_end_iterate(it);
-
-    // make sure we have proper amount of rooms
-    if (created_rooms != max_rooms)
-    {
-        map_generate();
-        return;
-    }
-
-    // if our map is accepted, then find end rooms
-    // we need to have at least 3 end rooms per level (item, shop, boss)
-    if (map_find_end_rooms() == NULL)
-    {
-        map_generate();
-        diag("\nERROR in dungeon generation! Not enough of end rooms were created!");
-        return;
-    }
-
-    // find boss fight room
-    // no boss room found (for some reason...)
-    if (map_find_boss_room() == NULL)
-    {
-        map_generate();
-        diag("\nERROR in dungeon generation! Boss fight room wasn't created!");
-        return;
-    }
-
-    // no shop room found ?
-    if (map_find_shop_room() == NULL)
-    {
-        map_generate();
-        diag("\nERROR in dungeon generation! Shop room wasn't created!");
-        return;
-    }
-
-    // no item rooms or not all of the rest end rooms occupied ?
-    if (map_find_item_rooms() == NULL)
-    {
-        map_generate();
-        diag("\nERROR in dungeon generation! No item rooms were created!");
-        return;
-    }
-
-    // calculate positions for the secrets to spawn at
-    map_calculate_secret_pos_chance();
-
-    // no secret rooms ?
-    if (map_find_secret_rooms() == NULL)
-    {
-        map_generate();
-        diag("\nERROR in dungeon generation! No secret rooms were created!");
-        return;
-    }
-
-    // no super secret room ?
-    if (map_find_super_secret_room() == NULL)
-    {
-        map_generate();
-        diag("\nERROR in dungeon generation! No super secret room was created!");
-        return;
-    }
-
-    // create all 3d rooms
-    // currently only for visualisation/debugging
-    // this is very ugly... and will be removed !
-    int i = 0, j = 0;
-    for (i = 0; i < GRID_MAX_X; i++)
-    {
-        for (j = 0; j < GRID_MAX_Y; j++)
-        {
-            int type = map[i][j].type;
-
-            // room doesn't exist ?
-            if (type == ROOM_NONE)
-            {
-                continue;
-            }
-
             VECTOR pos;
-            vec_set(&pos, &map[i][j].pos);
+            vec_set(&pos, vector(pos_x + (x * MAP_CELL_SIZE), pos_y + (y * MAP_CELL_SIZE), 0));
 
-            int room_up = map[i][j].up;
-            int room_right = map[i][j].right;
-            int room_bottom = map[i][j].bottom;
-            int room_left = map[i][j].left;
+            VECTOR size;
+            vec_set(&size, vector(MAP_CELL_SIZE * DEBUG_FONT_SCALE, MAP_CELL_SIZE * DEBUG_FONT_SCALE, 0));
 
-            if (room_up == true && room_right == false && room_bottom == false && room_left == false) // only up / right / bottom / left
+            int type = map[x][y].type;
+
+            int top_room = map[x][y].top;
+            int right_room = map[x][y].right;
+            int bottom_room = map[x][y].bottom;
+            int left_room = map[x][y].left;
+
+            VECTOR color;
+            vec_set(&color, COLOR_WHITE);
+
+            var bmap_scale = 2;
+            var bmap_alpha = 100;
+
+            if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
+                vec_set(&color, COLOR_GREY);
+
+            if (top_room && !right_room && !bottom_room && !left_room)
+                draw_quad(room[ROOM_TOP], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (!top_room && right_room && !bottom_room && !left_room)
+                draw_quad(room[ROOM_RIGHT], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (!top_room && !right_room && bottom_room && !left_room)
+                draw_quad(room[ROOM_BOTTOM], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (!top_room && !right_room && !bottom_room && left_room)
+                draw_quad(room[ROOM_LEFT], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (top_room && right_room && !bottom_room && !left_room)
+                draw_quad(room[ROOM_TOP_N_RIGHT], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (!top_room && right_room && bottom_room && !left_room)
+                draw_quad(room[ROOM_RIGHT_N_BOTTOM], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (!top_room && !right_room && bottom_room && left_room)
+                draw_quad(room[ROOM_BOTTOM_N_LEFT], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (top_room && !right_room && !bottom_room && left_room)
+                draw_quad(room[ROOM_LEFT_N_TOP], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (top_room && right_room && !bottom_room && left_room)
+                draw_quad(room[ROOM_LEFT_TOP_N_RIGHT], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (top_room && right_room && bottom_room && !left_room)
+                draw_quad(room[ROOM_TOP_RIGHT_N_BOTTOM], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (!top_room && right_room && bottom_room && left_room)
+                draw_quad(room[ROOM_RIGHT_BOTTOM_N_LEFT], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (top_room && !right_room && bottom_room && left_room)
+                draw_quad(room[ROOM_BOTTOM_LEFT_N_TOP], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (top_room && !right_room && bottom_room && !left_room)
+                draw_quad(room[ROOM_TOP_N_BOTTOM], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (!top_room && right_room && !bottom_room && left_room)
+                draw_quad(room[ROOM_RIGHT_N_LEFT], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (top_room && right_room && bottom_room && left_room)
+                draw_quad(room[ROOM_ALL_SIDES], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+            else if (!top_room && !right_room && !bottom_room && !left_room)
+                draw_quad(room[ROOM_VOID], &pos, NULL, NULL, vector(bmap_scale, bmap_scale, 0), &color, bmap_alpha, 0);
+
+            if (key_enter)
             {
-                ENTITY *tile_ent = ent_create(room_only_up_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
+                var temp_x = pos.x + (size.x / 2);
+                var temp_y = pos.y + (size.y / 2);
+
+                switch (type)
                 {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
+                case ROOM_NONE:
+                    draw_quad(NULL, vector(temp_x, temp_y, 0), NULL, &size, NULL, vector(8, 8, 8), 100, 0);
+                    break;
+
+                case ROOM_NORMAL:
+                    draw_quad(NULL, vector(temp_x, temp_y, 0), NULL, &size, NULL, vector(128, 128, 128), 100, 0);
+                    break;
+
+                case ROOM_START:
+                    draw_quad(NULL, vector(temp_x, temp_y, 0), NULL, &size, NULL, vector(0, 128, 0), 100, 0);
+                    break;
+
+                case ROOM_BOSS:
+                    draw_quad(NULL, vector(temp_x, temp_y, 0), NULL, &size, NULL, vector(0, 0, 128), 100, 0);
+                    break;
+
+                case ROOM_SPECIAL:
+                    draw_quad(NULL, vector(temp_x, temp_y, 0), NULL, &size, NULL, vector(128, 128, 0), 100, 0);
+                    break;
+
+                case ROOM_LOCKED:
+                    draw_quad(NULL, vector(temp_x, temp_y, 0), NULL, &size, NULL, vector(128, 0, 0), 100, 0);
+                    break;
+
+                case ROOM_SECRET:
+                    draw_quad(NULL, vector(temp_x, temp_y, 0), NULL, &size, NULL, vector(64, 64, 64), 100, 0);
+                    break;
+
+                case ROOM_SUPER_SECRET:
+                    draw_quad(NULL, vector(temp_x, temp_y, 0), NULL, &size, NULL, vector(32, 64, 128), 100, 0);
+                    break;
                 }
-            }
-            else if (room_up == false && room_right == true && room_bottom == false && room_left == false)
-            {
-                ENTITY *tile_ent = ent_create(room_only_right_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == false && room_right == false && room_bottom == true && room_left == false)
-            {
-                ENTITY *tile_ent = ent_create(room_only_bottom_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == false && room_right == false && room_bottom == false && room_left == true)
-            {
-                ENTITY *tile_ent = ent_create(room_only_left_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == true && room_right == true && room_bottom == false && room_left == false) // two sides at the same time
-            {
-                ENTITY *tile_ent = ent_create(room_up_right_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == false && room_right == true && room_bottom == true && room_left == false)
-            {
-                ENTITY *tile_ent = ent_create(room_right_bottom_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == false && room_right == false && room_bottom == true && room_left == true)
-            {
-                ENTITY *tile_ent = ent_create(room_bottom_left_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == true && room_right == false && room_bottom == false && room_left == true)
-            {
-                ENTITY *tile_ent = ent_create(room_left_up_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == true && room_right == false && room_bottom == true && room_left == false) // parallel sides ?
-            {
-                ENTITY *tile_ent = ent_create(room_up_bottom_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == false && room_right == true && room_bottom == false && room_left == true)
-            {
-                ENTITY *tile_ent = ent_create(room_left_right_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == true && room_right == true && room_bottom == false && room_left == true) // three sides ?
-            {
-                ENTITY *tile_ent = ent_create(room_up_right_left_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == true && room_right == true && room_bottom == true && room_left == false)
-            {
-                ENTITY *tile_ent = ent_create(room_up_right_bottom_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == false && room_right == true && room_bottom == true && room_left == true)
-            {
-                ENTITY *tile_ent = ent_create(room_right_bottom_left_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == true && room_right == false && room_bottom == true && room_left == true)
-            {
-                ENTITY *tile_ent = ent_create(room_bottom_left_up_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
-            }
-            else if (room_up == true && room_right == true && room_bottom == true && room_left == true) // all 4 doors ?
-            {
-                ENTITY *tile_ent = ent_create(room_all_mdl, &pos, room_fnc);
-                if (type == ROOM_SECRET || type == ROOM_SUPER_SECRET)
-                {
-                    if (tile_ent)
-                    {
-                        set(tile_ent, TRANSLUCENT);
-                    }
-                }
+
+                if (map[x][y].type == ROOM_NONE)
+                    draw_text(str_for_num(NULL, map[x][y].secret_chance), temp_x, temp_y, COLOR_WHITE);
+                else
+                    draw_text(str_for_num(NULL, map[x][y].region), temp_x, temp_y, COLOR_WHITE);
             }
         }
     }
+
+    if (key_enter)
+    {
+        VECTOR size;
+        vec_set(&size, vector(MAP_CELL_SIZE * DEBUG_FONT_SCALE, MAP_CELL_SIZE * DEBUG_FONT_SCALE, 0));
+
+        var icon_pos_x = 10;
+        var icon_pos_y = 128;
+        var text_offset_x = 22;
+
+        draw_quad(NULL, vector(icon_pos_x - 4, icon_pos_y - 4, 0), NULL, vector(120, 164, 0), NULL, vector(0, 0, 0), 50, 0);
+        draw_text("Rooms:", icon_pos_x, icon_pos_y - MAP_CELL_SIZE * 1.5 * DEBUG_FONT_SCALE, COLOR_RED);
+
+        draw_quad(NULL, vector(icon_pos_x, icon_pos_y, 0), NULL, &size, NULL, vector(8, 8, 8), 100, 0);
+        draw_text("none", icon_pos_x + text_offset_x, icon_pos_y, COLOR_RED);
+
+        icon_pos_y += 20;
+        draw_quad(NULL, vector(icon_pos_x, icon_pos_y, 0), NULL, &size, NULL, vector(128, 128, 128), 100, 0);
+        draw_text("normal", icon_pos_x + text_offset_x, icon_pos_y, COLOR_RED);
+
+        icon_pos_y += 20;
+        draw_quad(NULL, vector(icon_pos_x, icon_pos_y, 0), NULL, &size, NULL, vector(0, 128, 0), 100, 0);
+        draw_text("start", icon_pos_x + text_offset_x, icon_pos_y, COLOR_RED);
+
+        icon_pos_y += 20;
+        draw_quad(NULL, vector(icon_pos_x, icon_pos_y, 0), NULL, &size, NULL, vector(0, 0, 128), 100, 0);
+        draw_text("finish (boss)", icon_pos_x + text_offset_x, icon_pos_y, COLOR_RED);
+
+        icon_pos_y += 20;
+        draw_quad(NULL, vector(icon_pos_x, icon_pos_y, 0), NULL, &size, NULL, vector(128, 128, 0), 100, 0);
+        draw_text("special", icon_pos_x + text_offset_x, icon_pos_y, COLOR_RED);
+
+        icon_pos_y += 20;
+        draw_quad(NULL, vector(icon_pos_x, icon_pos_y, 0), NULL, &size, NULL, vector(128, 0, 0), 100, 0);
+        draw_text("locked", icon_pos_x + text_offset_x, icon_pos_y, COLOR_RED);
+
+        icon_pos_y += 20;
+        draw_quad(NULL, vector(icon_pos_x, icon_pos_y, 0), NULL, &size, NULL, vector(64, 64, 64), 100, 0);
+        draw_text("secret", icon_pos_x + text_offset_x, icon_pos_y, COLOR_RED);
+
+        icon_pos_y += 20;
+        draw_quad(NULL, vector(icon_pos_x, icon_pos_y, 0), NULL, &size, NULL, vector(32, 64, 128), 100, 0);
+        draw_text("super secret", icon_pos_x + text_offset_x, icon_pos_y, COLOR_RED);
+    }
+}
+
+void room_bmaps_create()
+{
+    int width = 16;
+    int height = 16;
+
+    int i = 0, x = 0, y = 0;
+    for (i = 0; i < MAX_ROOM_SPRITES; i++)
+    {
+        room[i] = bmap_createblack(MAP_CELL_SIZE, MAP_CELL_SIZE, 8888);
+        bmap_blitpart(room[i], rooms_pcx, NULL, NULL, vector(x * height, y * width, 0), vector(height, width, 0));
+
+        x++;
+        if (x >= 4)
+        {
+            x = 0;
+            y++;
+        }
+    }
+}
+
+void room_bmaps_destroy()
+{
+    int i = 0;
+    for (i = 0; i < MAX_ROOM_SPRITES; i++)
+        safe_remove(room[i]);
 }
 
 void on_exit_event()
 {
-    map_clear_lists_all();
+    array_destroy(rooms_queue_list);
+    array_destroy(end_rooms_list);
+    array_destroy(secret_positions_list);
+    array_destroy(secret_rooms_list);
+    array_destroy(super_positions_list);
+
+    room_bmaps_destroy();
 }
 
 void main()
@@ -1375,67 +1053,34 @@ void main()
     on_exit = on_exit_event;
     on_space = map_generate;
 
-    fps_max = 60;
-    warn_level = 6;
-
     random_seed(0);
 
+    fps_max = 60;
+    warn_level = 6;
     video_mode = 9;
-    video_switch(video_mode, 0, 0);
 
-    level_load("");
+    wait(1);
+
+    draw_textmode("Arial", 0, MAP_CELL_SIZE * DEBUG_FONT_SCALE, 100);
+
+    room_bmaps_create();
+
+    vec2d_set(&cardinal_dir[CARDINAL_TOP], 0, -1);
+    vec2d_set(&cardinal_dir[CARDINAL_RIGHT], 1, 0);
+    vec2d_set(&cardinal_dir[CARDINAL_BOTTOM], 0, 1);
+    vec2d_set(&cardinal_dir[CARDINAL_LEFT], -1, 0);
 
     map_generate();
 
-    VECTOR pos;
-    map_get_center_pos(&pos);
-    vec_set(&camera->x, vector(pos.x, pos.y, 1000));
-    vec_set(&camera->pan, vector(0, -90, 0));
-
-    mouse_pointer = 2;
-    mouse_mode = 4;
-
     while (!key_esc)
     {
-        DEBUG_VAR(item_rooms_list.count, 0);
-        DEBUG_VAR(end_rooms_list.count, 20);
-        DEBUG_VAR((end_rooms_list.count - 2), 40);
+        draw_text(str_printf(NULL,
+                             "level=%d;\nrooms=%d/%d;\nsecrets=%d/%d;\nlocked=%d/%d;\ntotal endrooms=%d;",
+                             (long)level_id, (long)array_size(rooms_queue_list), (long)max_rooms, (long)created_secret_rooms,
+                             (long)max_secrets, (long)created_item_rooms, (long)max_item_rooms, (long)array_size(end_rooms_list)),
+                  10, 10, COLOR_RED);
 
-        draw_text(
-            str_printf(NULL,
-                       "created room: %d\nmax rooms: %d\nqueue count: %d\nend rooms: %d\nsecret rooms: %d\nmax secrets: %d\nitem rooms: %d",
-                       (long)created_rooms, (long)max_rooms, (long)rooms_queue_list.count, (long)end_rooms_list.count, (long)secret_rooms_list.count, (long)max_secrets, (long)item_rooms_list.count),
-            10, 240, COLOR_RED);
-
-        VECTOR mouse_3d_pos;
-        vec_set(&mouse_3d_pos, vector(mouse_pos.x, mouse_pos.y, camera->z));
-        vec_for_screen(&mouse_3d_pos, camera);
-        vec_to_grid(&mouse_3d_pos);
-        draw_point3d(vector(mouse_3d_pos.x, mouse_3d_pos.y, 0), COLOR_RED, 100, ROOM_SIZE * 0.5);
-
-        int i = 0, j = 0;
-        i = floor(-mouse_3d_pos.x / ROOM_SIZE);
-        i = clamp(i, -1, GRID_MAX_X);
-        j = floor(-mouse_3d_pos.y / ROOM_SIZE);
-        j = clamp(j, -1, GRID_MAX_Y);
-
-        if (i >= 0 && i < GRID_MAX_X && j >= 0 && j < GRID_MAX_Y)
-        {
-            DEBUG_VAR(map_room_all_same_neighbours(&map[i][j]), 80);
-
-            draw_text(
-                str_printf(NULL,
-                           "type: %d\ni: %d\nj: %d\nid: %d\ndoors: %d\nup: %d\nright: %d\nbottom: %d\nleft: %d\nsecret up: %d\nsecret right: %d\nsecret bottom: %d\nsecret left: %d",
-                           (long)map[i][j].type, (long)map[i][j].pos_x, (long)map[i][j].pos_y, (long)map[i][j].id, (long)map[i][j].doors, (long)map[i][j].up, (long)map[i][j].right, (long)map[i][j].bottom, (long)map[i][j].left, (long)map[i][j].secret_up, (long)map[i][j].secret_right, (long)map[i][j].secret_bottom, (long)map[i][j].secret_left),
-                10, 420, COLOR_RED);
-        }
-
-        if (key_enter)
-        {
-            map_draw_debug();
-        }
-
+        map_draw(384, 128);
         wait(1);
     }
-    sys_exit(NULL);
 }
