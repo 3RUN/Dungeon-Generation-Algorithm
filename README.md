@@ -1,5 +1,5 @@
 # Dungeon-Generation-Algorithm
-The Binding of Isaac-like dungeon generation.
+The Binding of Isaac-like dungeon generation written in LiteC.
 
 # Credits:
 * Dungeon Generation in Binding of Isaac tutorial 
